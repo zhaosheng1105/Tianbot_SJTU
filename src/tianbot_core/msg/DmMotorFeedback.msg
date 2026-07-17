@@ -1,0 +1,8 @@
+uint8 id
+string state
+string control_mode
+float32 output_speed_rad_s
+float32 output_torque_nm
+float32 mos_temp_c
+float32 coil_temp_c
+uint32 last_feedback_age_ms

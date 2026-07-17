@@ -1,0 +1,9 @@
+string mode
+bool save_to_flash
+---
+bool success
+string current_chassis_mode
+string current_pc_control_mode
+string current_dm_mode
+bool ready
+string message

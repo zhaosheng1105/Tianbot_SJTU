@@ -1,0 +1,2 @@
+# Keep ROS 2 source and executable scripts portable across Windows and Linux.
+* text=auto eol=lf

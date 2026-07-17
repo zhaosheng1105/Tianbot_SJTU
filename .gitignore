@@ -1,0 +1,18 @@
+# ROS 2 / colcon build products
+build/
+install/
+log/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local editor and workspace metadata
+.vscode/
+.idea/
+.agents/
+.codex/
+
+# OS-generated files
+.DS_Store
+Thumbs.db
