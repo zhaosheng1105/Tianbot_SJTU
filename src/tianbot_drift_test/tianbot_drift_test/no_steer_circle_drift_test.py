@@ -1,10 +1,11 @@
-#!/usr/bin/env python3
-"""ROS2 test node for the Tianbot DYN no-steer drift car.
+"""ROS 2 test node for the Tianbot DYN no-steer drift car.
 
 The controller uses IMU yaw rate as the primary feedback signal. Odometry is
 used only for a weak speed loop and, when explicitly enabled, a weak radius
-outer loop. Controller wheel order is always FL, FR, RL, RR; commands are
-converted to the motor signs expected by tianbot_core before publication.
+outer loop. Controller wheel order is always FL, FR, RL, RR. The DYN MIT
+interface already normalizes the installed motor directions, so the default
+torque signs are all positive; per-wheel overrides remain available for other
+hardware configurations.
 """
 
 import csv
@@ -60,7 +61,7 @@ class NoSteerCircleDriftTest(Node):
         self.motor_torque_signs = [
             float(value)
             for value in self.param(
-                "motor_torque_signs", [1.0, -1.0, 1.0, -1.0]
+                "motor_torque_signs", [1.0, 1.0, 1.0, 1.0]
             )
         ]
         if len(self.motor_torque_signs) != 4:
