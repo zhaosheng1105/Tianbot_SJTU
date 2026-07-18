@@ -1,0 +1,84 @@
+drift_4wid_speed_yaw_pid:
+  ros__parameters:
+    # Tianbot DYN interfaces.
+    imu_topic: /tianbot/imu
+    odom_topic: /tianbot/odom
+    wheel_torque_command_topic: /tianbot/wheel_mit_cmd
+    diagnostics_topic: /drift_4wid_speed_yaw_pid/diagnostics
+    mode_status_topic: /tianbot/motion_mode_status
+    set_control_mode_service: /tianbot/set_control_mode
+
+    # Switch to MIT mode, wait for fresh sensors, count down, then run once.
+    auto_start: true
+    activate_mit_on_start: true
+    require_mit_mode: true
+    mit_activation_timeout_s: 15.0
+    auto_start_delay_s: 3.0
+
+    # Logical and DYN order: FL, FR, RL, RR.
+    motor_torque_signs: [1.0, 1.0, 1.0, 1.0]
+
+    # Confirmed convention: right-handed IMU, CCW positive. The MATLAB
+    # equilibrium and initiation pulse in this file were validated for CCW.
+    imu_yaw_sign: 1.0
+    direction: 1.0
+
+    # MATLAB target and vehicle values used by acceleration feedforward.
+    control_rate_hz: 100.0
+    target_radius_m: 1.0
+    target_speed_mps: 2.0
+    target_turns: 3.0
+    vehicle_mass_kg: 7.0
+    wheel_radius_m: 0.048
+
+    # Only stationary gyro-bias subtraction is retained. There are deliberately
+    # no IMU, yaw-rate derivative, odom-speed, or speed-derivative filters.
+    calibration_time_s: 0.40
+    calibration_timeout_s: 2.0
+    calibration_min_samples: 20
+
+    # Acceleration and open-loop initiation from the MATLAB controller.
+    accel_time_s: 0.78
+    accel_torque_max_nm: 0.54
+    accel_max_yaw_correction_nm: 0.08
+    pulse_duration_s: 0.16
+    pulse_torque_nm: [-0.32, 0.65, -0.24, 0.62]
+    transition_time_s: 0.24
+
+    # mu=0.75 nonlinear equilibrium solved offline in MATLAB. These are four
+    # independent values; the ROS node does not solve the tire model online.
+    hold_feedforward_nm: [-0.0847406096744224, 0.147028287360532,
+                          -0.142627453057868, 0.454569644219509]
+    speed_distribution_weights: [1.77008112606801, 1.76275243840561,
+                                 0.233583217763192, 0.233583217763192]
+    yaw_distribution_vector: [-1.76641678223681, 1.76641678223681,
+                              -0.233583217763192, 0.233583217763192]
+
+    # Raw odom-speed PID. The D term is a direct sample-to-sample difference.
+    speed_kp_nm_per_mps: 0.24
+    speed_ki_nm_per_m: 0.10
+    speed_kd_nm_per_mps2: 0.012
+    max_speed_correction_nm: 0.22
+    speed_integral_limit_m: 1.2
+
+    # Raw bias-corrected IMU yaw-rate PID. No low-pass filter is applied.
+    yaw_kp_nm_per_radps: 0.30
+    yaw_ki_nm_per_rad: 0.080
+    yaw_kd_nm_per_radps2: 0.025
+    max_yaw_correction_nm: 0.30
+    yaw_integral_limit_rad: 2.0
+
+    # MATLAB actuator constraints. command_slew limits torque commands; it is
+    # not a sensor-data filter.
+    stop_time_s: 0.55
+    software_torque_max_nm: 0.68
+    command_slew_nmps: 4.0
+
+    # Hardware safety checks. Zero max_run_time uses the MATLAB time formula.
+    sensor_timeout_s: 0.20
+    max_abs_yaw_rate_radps: 5.0
+    max_odom_speed_mps: 3.5
+    wrong_direction_yaw_threshold_radps: 0.20
+    wrong_direction_timeout_s: 0.30
+    max_run_time_s: 0.0
+    log_directory: ~/.ros/drift_test_logs

@@ -45,11 +45,11 @@ class MatlabDriftPid(Node):
         PHASE_ABORT: "abort",
     }
 
-    def __init__(self, controller_kind):
+    def __init__(self, controller_kind, node_name=None):
         if controller_kind not in (self.KIND_IMU_ONLY, self.KIND_IMU_ODOM):
             raise ValueError("unsupported controller kind: %s" % controller_kind)
 
-        node_name = "drift_%s_pid" % controller_kind
+        node_name = node_name or "drift_%s_pid" % controller_kind
         super().__init__(node_name)
         self.controller_kind = controller_kind
         self.uses_odom = controller_kind == self.KIND_IMU_ODOM
@@ -142,9 +142,7 @@ class MatlabDriftPid(Node):
             1.0 / self.control_rate_hz, self.control_callback
         )
 
-        feedback = "IMU yaw-rate PD only"
-        if self.uses_odom:
-            feedback = "IMU yaw-rate PD + odom speed P + odom radius PD"
+        feedback = self.feedback_description()
         self.get_logger().info(
             "%s ready: R=%.3f m, V=%.3f m/s, r=%.4f rad/s, turns=%.2f"
             % (
@@ -174,6 +172,11 @@ class MatlabDriftPid(Node):
                 "safety delay followed by %.2f s stationary IMU calibration."
                 % (self.auto_start_delay, self.calibration_time)
             )
+
+    def feedback_description(self):
+        if self.uses_odom:
+            return "IMU yaw-rate PD + odom speed P + odom radius PD"
+        return "IMU yaw-rate PD only"
 
     def _read_common_parameters(self):
         self.control_rate_hz = float(self.param("control_rate_hz", 100.0))
