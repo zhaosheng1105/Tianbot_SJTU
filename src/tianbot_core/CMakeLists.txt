@@ -122,14 +122,6 @@ install(TARGETS tianbot_core
     DESTINATION lib/${PROJECT_NAME}
 )
 
-# Install the Python drift-test node where `ros2 run`/`ros2 launch` can find it.
-# RENAME keeps the executable name used by first_test.launch.py extension-free.
-install(PROGRAMS
-    scripts/no_steer_circle_drift_test.py
-    DESTINATION lib/${PROJECT_NAME}
-    RENAME no_steer_circle_drift_test
-)
-
 install(DIRECTORY launch param scripts
     DESTINATION share/${PROJECT_NAME}/
 )

@@ -1,0 +1,81 @@
+drift_imu_odom_pid:
+  ros__parameters:
+    # Tianbot DYN interfaces.
+    imu_topic: /tianbot/imu
+    odom_topic: /tianbot/odom
+    wheel_torque_command_topic: /tianbot/wheel_mit_cmd
+    diagnostics_topic: /drift_imu_odom_pid/diagnostics
+    mode_status_topic: /tianbot/motion_mode_status
+    set_control_mode_service: /tianbot/set_control_mode
+
+    # One launch command switches to MIT mode, waits for readiness, counts down,
+    # performs stationary gyro calibration, and executes one test.
+    auto_start: true
+    activate_mit_on_start: true
+    require_mit_mode: true
+    mit_activation_timeout_s: 15.0
+    auto_start_delay_s: 3.0
+
+    # MATLAB logical order is FL, FR, RL, RR. The DYN interface uses the same
+    # normalized wheel-torque directions. Override only for different hardware.
+    motor_torque_signs: [1.0, 1.0, 1.0, 1.0]
+
+    # Confirmed vehicle convention: right-handed IMU, CCW z positive.
+    imu_yaw_sign: 1.0
+    direction: 1.0
+
+    # drift_imu_odom_pid.m target.
+    control_rate_hz: 100.0
+    target_radius_m: 0.60
+    target_speed_mps: 1.00
+    target_turns: 3.0
+
+    # Stationary IMU bias estimate and the MATLAB filters.
+    calibration_time_s: 0.40
+    calibration_timeout_s: 2.0
+    calibration_min_samples: 20
+    imu_filter_tau_s: 0.020
+    imu_derivative_tau_s: 0.050
+
+    # Exact odom-assisted acceleration and initiation pulse from MATLAB.
+    accel_time_s: 0.50
+    accel_feedforward_nm: 0.140
+    accel_torque_max_nm: 0.29
+    pulse_duration_s: 0.180
+    pulse_inner_torque_nm: -0.258487313274
+    pulse_outer_torque_nm: 0.480
+    pulse_speed_kp_nm_per_mps: 0.080
+
+    # Exact equilibrium feedforward and closed-loop gains from MATLAB.
+    transition_time_s: 0.18
+    hold_left_feedforward_nm: -0.214606873213331
+    hold_right_feedforward_nm: 0.306833460264262
+    yaw_kp_nm_per_radps: 0.240
+    yaw_kd_nm_per_radps2: 0.010
+    max_yaw_correction_nm: 0.18
+    speed_filter_tau_s: 0.060
+    speed_kp_nm_per_mps: 0.300
+    max_speed_correction_nm: 0.18
+
+    # Odom circle-center/radius outer loop from drift_imu_odom_pid.m.
+    center_lock_delay_s: 0.80
+    radius_enable_delay_s: 1.20
+    radius_kp_radps_per_m: 0.20
+    radius_kd_rad_per_m: 0.060
+    radius_filter_tau_s: 0.25
+    radius_rate_tau_s: 0.35
+    max_radius_yaw_bias_radps: 0.12
+
+    stop_time_s: 0.45
+    software_torque_max_nm: 0.48
+    command_slew_nmps: 3.0
+
+    # Hardware safety checks. A zero max_run_time selects the MATLAB formula.
+    sensor_timeout_s: 0.20
+    max_abs_yaw_rate_radps: 4.0
+    max_odom_speed_mps: 2.5
+    wrong_direction_yaw_threshold_radps: 0.20
+    wrong_direction_timeout_s: 0.30
+    max_run_time_s: 0.0
+    log_directory: ~/.ros/drift_test_logs
+

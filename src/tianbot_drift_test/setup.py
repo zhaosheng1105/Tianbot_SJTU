@@ -9,7 +9,7 @@ package_name = "tianbot_drift_test"
 
 setup(
     name=package_name,
-    version="0.1.0",
+    version="0.2.0",
     packages=find_packages(exclude=("test",)),
     data_files=[
         (
@@ -25,12 +25,16 @@ setup(
     maintainer="tianbot",
     maintainer_email="tianbot@todo.todo",
     description=(
-        "Low-speed commissioning tests for no-steer drifting on the Tianbot "
+        "MATLAB-derived IMU and odometry drift controllers for the Tianbot "
         "DYN chassis."
     ),
     license="BSD-3-Clause",
     entry_points={
         "console_scripts": [
+            "drift_imu_only_pid = "
+            "tianbot_drift_test.drift_imu_only_pid:main",
+            "drift_imu_odom_pid = "
+            "tianbot_drift_test.drift_imu_odom_pid:main",
             "no_steer_circle_drift_test = "
             "tianbot_drift_test.no_steer_circle_drift_test:main",
         ],
