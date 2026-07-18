@@ -16,11 +16,15 @@ def generate_launch_description():
 
     config = LaunchConfiguration("config")
     use_odom_radius = LaunchConfiguration("use_odom_radius")
+    auto_start = LaunchConfiguration("auto_start")
+    activate_mit = LaunchConfiguration("activate_mit")
 
     return LaunchDescription(
         [
             DeclareLaunchArgument("config", default_value=default_config),
             DeclareLaunchArgument("use_odom_radius", default_value="false"),
+            DeclareLaunchArgument("auto_start", default_value="true"),
+            DeclareLaunchArgument("activate_mit", default_value="true"),
             Node(
                 package="tianbot_drift_test",
                 executable="no_steer_circle_drift_test",
@@ -31,7 +35,11 @@ def generate_launch_description():
                     {
                         "use_odom_radius_feedback": ParameterValue(
                             use_odom_radius, value_type=bool
-                        )
+                        ),
+                        "auto_start": ParameterValue(auto_start, value_type=bool),
+                        "activate_mit_on_start": ParameterValue(
+                            activate_mit, value_type=bool
+                        ),
                     },
                 ],
             ),

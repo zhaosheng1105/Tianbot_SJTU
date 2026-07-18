@@ -33,24 +33,15 @@ source install/setup.bash
 ros2 launch tianbot_core tianbot_core.launch.py
 ```
 
-将底盘切换到 MIT 模式：
-
-```bash
-ros2 service call /tianbot/set_control_mode \
-  tianbot_core/srv/SetControlMode "{mode: 'mit', save_to_flash: false}"
-```
-
 启动测试节点：
 
 ```bash
 ros2 launch tianbot_drift_test no_steer_circle_drift_test.launch.py
 ```
 
-车辆静止并完成 IMU 零偏采样后，开始测试：
-
-```bash
-ros2 service call /no_steer_circle_drift_test/start std_srvs/srv/Trigger "{}"
-```
+节点会自动请求 `/tianbot/set_control_mode` 切换到 MIT 模式，并等待底盘、
+四个电机、IMU、里程计和陀螺零偏采样全部就绪。检查通过后默认倒计时 3 秒，
+随后只自动执行一次测试，无需再调用 `start` 服务。
 
 随时中止测试：
 
@@ -67,6 +58,13 @@ ros2 service call /no_steer_circle_drift_test/abort std_srvs/srv/Trigger "{}"
 ros2 launch tianbot_drift_test no_steer_circle_drift_test.launch.py \
   config:=/absolute/path/to/drift_test.yaml \
   use_odom_radius:=true
+```
+
+需要恢复手动启动模式时，可在 launch 命令中关闭自动启动：
+
+```bash
+ros2 launch tianbot_drift_test no_steer_circle_drift_test.launch.py \
+  auto_start:=false activate_mit:=false
 ```
 
 DYN MIT 接口已经统一电机正方向，所以默认的 `motor_torque_signs` 是

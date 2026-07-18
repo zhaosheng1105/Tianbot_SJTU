@@ -22,6 +22,7 @@ from sensor_msgs.msg import Imu
 from std_msgs.msg import Float64MultiArray, MultiArrayDimension
 from std_srvs.srv import Trigger
 from tianbot_core.msg import DmMitCommand, RoverMotionModeStatus
+from tianbot_core.srv import SetControlMode
 
 
 class NoSteerCircleDriftTest(Node):
@@ -58,6 +59,19 @@ class NoSteerCircleDriftTest(Node):
             "mode_status_topic", "/tianbot/motion_mode_status"
         )
         self.require_mit_mode = bool(self.param("require_mit_mode", True))
+        self.auto_start = bool(self.param("auto_start", True))
+        self.activate_mit_on_start = bool(
+            self.param("activate_mit_on_start", True)
+        )
+        self.set_control_mode_service = self.param(
+            "set_control_mode_service", "/tianbot/set_control_mode"
+        )
+        self.mit_activation_timeout = max(
+            1.0, float(self.param("mit_activation_timeout_s", 15.0))
+        )
+        self.auto_start_delay = max(
+            0.0, float(self.param("auto_start_delay_s", 3.0))
+        )
         self.motor_torque_signs = [
             float(value)
             for value in self.param(
@@ -128,7 +142,14 @@ class NoSteerCircleDriftTest(Node):
 
         self.phase = self.PHASE_IDLE
         self.phase_start = self.get_clock().now()
+        self.node_start_time = self.phase_start
         self.last_control_time = self.phase_start
+        self.auto_start_done = not self.auto_start
+        self.auto_start_ready_since = None
+        self.auto_start_wait_reason = ""
+        self.mit_request_future = None
+        self.mit_request_stamp = None
+        self.mit_request_confirmed = not self.activate_mit_on_start
         self.test_start = None
         self.abort_reason = ""
         self.last_imu_stamp = None
@@ -168,8 +189,12 @@ class NoSteerCircleDriftTest(Node):
             self.mode_status_callback,
             10,
         )
+        self.mode_client = self.create_client(
+            SetControlMode, self.set_control_mode_service
+        )
         self.start_service = self.create_service(Trigger, "~/start", self.start_callback)
         self.abort_service = self.create_service(Trigger, "~/abort", self.abort_callback)
+        self.startup_timer = self.create_timer(0.10, self.startup_callback)
         self.timer = self.create_timer(1.0 / self.rate_hz, self.control_callback)
 
         self.get_logger().info(
@@ -186,6 +211,12 @@ class NoSteerCircleDriftTest(Node):
             "Verify signs with wheels off the ground."
             % self.motor_torque_signs
         )
+        if self.auto_start:
+            self.get_logger().warning(
+                "AUTO START armed: MIT activation and readiness checks will be "
+                "followed by a %.1f s safety delay. Keep the test area clear."
+                % self.auto_start_delay
+            )
 
     def param(self, name, default):
         self.declare_parameter(name, default)
@@ -238,48 +269,161 @@ class NoSteerCircleDriftTest(Node):
             self.mode_status_received = True
             self.mit_mode_ready = ready
 
+    def startup_callback(self):
+        if not self.auto_start or self.auto_start_done:
+            return
+
+        now = self.get_clock().now()
+        if self.phase != self.PHASE_IDLE:
+            self.auto_start_done = True
+            return
+
+        if self.activate_mit_on_start and not self.mit_request_confirmed:
+            self.handle_mit_activation(now)
+            return
+
+        with self.lock:
+            ok, reason = self.sensors_ready(now)
+            if not ok:
+                self.auto_start_ready_since = None
+                self.set_auto_start_wait_reason(reason)
+                return
+            if len(self.gyro_idle_samples) < self.gyro_bias_min_samples:
+                self.auto_start_ready_since = None
+                self.set_auto_start_wait_reason("stationary IMU bias calibration")
+                return
+
+            self.set_auto_start_wait_reason("")
+            if self.auto_start_ready_since is None:
+                self.auto_start_ready_since = now
+                self.get_logger().warning(
+                    "MIT mode and sensors are ready. Vehicle will move in %.1f s; "
+                    "press Ctrl-C or call ~/abort to cancel."
+                    % self.auto_start_delay
+                )
+                return
+
+            if self.elapsed(now, self.auto_start_ready_since) < self.auto_start_delay:
+                return
+
+            success, message = self.start_test_locked(now)
+            if not success:
+                self.fail_auto_start(message)
+
+    def handle_mit_activation(self, now):
+        if self.mit_request_future is None:
+            if not self.mode_client.service_is_ready():
+                self.set_auto_start_wait_reason(
+                    "service %s" % self.set_control_mode_service
+                )
+                if self.elapsed(now, self.node_start_time) > self.mit_activation_timeout:
+                    self.fail_auto_start(
+                        "MIT mode service was unavailable for %.1f s"
+                        % self.mit_activation_timeout
+                    )
+                return
+
+            request = SetControlMode.Request()
+            request.mode = "mit"
+            request.save_to_flash = False
+            self.mit_request_stamp = now
+            self.mit_request_future = self.mode_client.call_async(request)
+            self.get_logger().info(
+                "Requesting MIT mode from %s" % self.set_control_mode_service
+            )
+            return
+
+        if not self.mit_request_future.done():
+            if self.elapsed(now, self.mit_request_stamp) > self.mit_activation_timeout:
+                self.fail_auto_start(
+                    "MIT activation did not complete within %.1f s"
+                    % self.mit_activation_timeout
+                )
+            return
+
+        try:
+            response = self.mit_request_future.result()
+        except Exception as exc:  # rclpy surfaces service transport failures here.
+            self.fail_auto_start("MIT activation service failed: %s" % exc)
+            return
+
+        if response is None or not response.success:
+            detail = "empty response" if response is None else response.message
+            self.fail_auto_start("MIT activation was rejected: %s" % detail)
+            return
+
+        self.mit_request_confirmed = True
+        self.set_auto_start_wait_reason("")
+        self.get_logger().info(
+            "MIT activation confirmed: chassis=%s, dm=%s, ready=%s"
+            % (
+                response.current_chassis_mode,
+                response.current_dm_mode,
+                response.ready,
+            )
+        )
+
+    def set_auto_start_wait_reason(self, reason):
+        if reason == self.auto_start_wait_reason:
+            return
+        self.auto_start_wait_reason = reason
+        if reason:
+            self.get_logger().info("Auto-start waiting for %s" % reason)
+
+    def fail_auto_start(self, reason):
+        self.auto_start_done = True
+        self.auto_start_ready_since = None
+        self.publish_command([0.0, 0.0, 0.0, 0.0])
+        self.get_logger().error(
+            "AUTO START cancelled: %s. Node remains idle." % reason
+        )
+
     def start_callback(self, _request, response):
         now = self.get_clock().now()
         with self.lock:
-            if self.phase != self.PHASE_IDLE:
-                response.success = False
-                response.message = "test is already active"
-                return response
-            ok, reason = self.sensors_ready(now)
-            if not ok:
-                response.success = False
-                response.message = reason
-                return response
-            if len(self.gyro_idle_samples) < self.gyro_bias_min_samples:
-                response.success = False
-                response.message = (
-                    "keep car stationary for IMU bias calibration (%d/%d samples)"
-                    % (len(self.gyro_idle_samples), self.gyro_bias_min_samples)
-                )
-                return response
-            self.gyro_bias = sum(self.gyro_idle_samples) / len(self.gyro_idle_samples)
-            self.test_start = now
-            self.phase_start = now
-            self.phase = self.PHASE_ACCEL
-            self.abort_reason = ""
-            self.yaw_integral = 0.0
-            self.circle_center = None
-            self.radius_raw = float("nan")
-            self.radius_filtered = float("nan")
-            self.previous_radius_filtered = float("nan")
-            self.previous_command = [0.0, 0.0, 0.0, 0.0]
-            self.open_log(now)
-            self.get_logger().warning("Drift test STARTED. Clear the test area.")
-            response.success = True
-            response.message = "drift test started"
+            response.success, response.message = self.start_test_locked(now)
             return response
+
+    def start_test_locked(self, now):
+        if self.phase != self.PHASE_IDLE:
+            return False, "test is already active"
+        ok, reason = self.sensors_ready(now)
+        if not ok:
+            return False, reason
+        if len(self.gyro_idle_samples) < self.gyro_bias_min_samples:
+            return False, (
+                "keep car stationary for IMU bias calibration (%d/%d samples)"
+                % (len(self.gyro_idle_samples), self.gyro_bias_min_samples)
+            )
+        self.gyro_bias = sum(self.gyro_idle_samples) / len(self.gyro_idle_samples)
+        self.test_start = now
+        self.phase_start = now
+        self.phase = self.PHASE_ACCEL
+        self.abort_reason = ""
+        self.yaw_integral = 0.0
+        self.circle_center = None
+        self.radius_raw = float("nan")
+        self.radius_filtered = float("nan")
+        self.previous_radius_filtered = float("nan")
+        self.previous_command = [0.0, 0.0, 0.0, 0.0]
+        self.auto_start_done = True
+        self.open_log(now)
+        self.get_logger().warning("Drift test STARTED. Clear the test area.")
+        return True, "drift test started"
 
     def abort_callback(self, _request, response):
         with self.lock:
             if self.phase == self.PHASE_IDLE:
+                pending_auto_start = self.auto_start and not self.auto_start_done
+                self.auto_start_done = True
+                self.auto_start_ready_since = None
                 self.publish_command([0.0, 0.0, 0.0, 0.0])
                 response.success = True
-                response.message = "already idle; zero command published"
+                response.message = (
+                    "pending auto-start cancelled; zero command published"
+                    if pending_auto_start
+                    else "already idle; zero command published"
+                )
                 return response
             self.enter_abort("manual abort")
             response.success = True
