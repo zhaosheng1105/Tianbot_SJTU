@@ -17,4 +17,4 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-drift_test_bag/
+ros2_bag/
