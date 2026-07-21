@@ -1,9 +1,9 @@
 """Hardware port of ``drift_4wid_independent_speed_yaw_pid.m``.
 
-The controller keeps the MATLAB logical wheel order FL, FR, RL, RR.  Per the
-hardware-test requirement, IMU yaw rate and odometry speed are not low-pass
-filtered.  The stationary gyro bias is still removed, and the D terms use a
-plain finite difference between consecutive raw sensor samples.
+The controller keeps the MATLAB logical wheel order FL, FR, RL, RR.  It ports
+the MATLAB sensor filters and the accelerometer-derived sideslip outer loop;
+the nonlinear tire equilibrium itself remains an offline calculation whose
+four-wheel result is supplied through ROS parameters.
 """
 
 import csv
@@ -20,15 +20,22 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
     """Four-wheel-independent speed/yaw PID for the Tianbot DYN chassis."""
 
     def __init__(self):
-        super().__init__(
-            self.KIND_IMU_ODOM, node_name="drift_4wid_speed_yaw_pid"
-        )
+        super().__init__(node_name="drift_4wid_speed_yaw_pid")
 
-        self.previous_yaw_sample = None
-        self.previous_yaw_sample_stamp = None
-        self.previous_speed_sample = None
-        self.previous_speed_sample_stamp = None
+        self.previous_yaw_filtered = 0.0
+        self.previous_speed_filtered = 0.0
+        self.yaw_filter_stamp = None
+        self.speed_filter_stamp = None
         self.speed_derivative = 0.0
+        self.accel_x_raw = 0.0
+        self.accel_y_raw = 0.0
+        self.accel_x_bias = 0.0
+        self.accel_y_bias = 0.0
+        self.accel_x = 0.0
+        self.accel_y = 0.0
+        self.accel_x_calibration_samples = []
+        self.accel_y_calibration_samples = []
+        self.beta_estimate = 0.0
         self.speed_integral = 0.0
         self.yaw_integral = 0.0
         self.last_speed_ref = 0.0
@@ -38,10 +45,15 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
         self.last_yaw_correction = 0.0
         self.last_raw_command = [0.0, 0.0, 0.0, 0.0]
 
-        self.get_logger().warning(
-            "Sensor filtering is DISABLED: yaw rate is gyro minus stationary "
-            "bias, speed is odom linear.x, and both D terms are raw finite "
-            "differences."
+        self.get_logger().info(
+            "MATLAB filters enabled: yaw tau=%.3f/%.3f s, speed "
+            "tau=%.3f/%.3f s (signal/derivative)."
+            % (
+                self.imu_filter_tau,
+                self.imu_derivative_tau,
+                self.speed_filter_tau,
+                self.speed_derivative_tau,
+            )
         )
         self.get_logger().info(
             "MATLAB nominal independent hold torque [FL, FR, RL, RR] = %s Nm"
@@ -50,8 +62,8 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
 
     def feedback_description(self):
         return (
-            "unfiltered IMU yaw-rate PID + unfiltered odom speed PID + "
-            "independent 4WID allocation"
+            "filtered IMU yaw-rate PID + filtered odom speed PID + "
+            "accelerometer sideslip outer loop + independent 4WID allocation"
         )
 
     def _read_common_parameters(self):
@@ -98,11 +110,11 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
 
         self.target_radius = float(self.param("target_radius_m", 1.0))
         self.target_speed = float(self.param("target_speed_mps", 2.0))
-        self.target_turns = float(self.param("target_turns", 3.0))
+        self.target_turns = float(self.param("target_turns", 5.0))
 
-        self.calibration_time = float(self.param("calibration_time_s", 0.40))
+        self.calibration_time = float(self.param("calibration_time_s", 2.00))
         self.calibration_timeout = float(
-            self.param("calibration_timeout_s", 2.0)
+            self.param("calibration_timeout_s", 3.0)
         )
         self.calibration_min_samples = int(
             self.param("calibration_min_samples", 20)
@@ -130,9 +142,48 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
             self.param("log_directory", "~/.ros/drift_test_logs")
         )
 
-    def _read_imu_odom_parameters(self):
+    def _read_controller_parameters(self):
         self.vehicle_mass = float(self.param("vehicle_mass_kg", 7.0))
         self.wheel_radius = float(self.param("wheel_radius_m", 0.048))
+
+        self.imu_filter_tau = float(self.param("imu_filter_tau_s", 0.020))
+        self.imu_derivative_tau = float(
+            self.param("imu_derivative_tau_s", 0.050)
+        )
+        self.speed_filter_tau = float(
+            self.param("speed_filter_tau_s", 0.060)
+        )
+        self.speed_derivative_tau = float(
+            self.param("speed_derivative_tau_s", 0.100)
+        )
+        self.accel_x_sign = (
+            1.0
+            if float(self.param("accel_x_sign", 1.0)) >= 0.0
+            else -1.0
+        )
+        self.accel_y_sign = (
+            1.0
+            if float(self.param("accel_y_sign", 1.0)) >= 0.0
+            else -1.0
+        )
+        self.beta_desired = math.radians(
+            float(self.param("beta_desired_deg", -30.0))
+        )
+        self.beta_kp = float(
+            self.param("beta_kp_radps_per_rad", 1.0)
+        )
+        self.max_beta_yaw_ref_correction = float(
+            self.param("max_beta_yaw_ref_correction_radps", 0.40)
+        )
+        self.beta_min = math.radians(
+            float(self.param("beta_estimate_min_deg", -70.0))
+        )
+        self.beta_max = math.radians(
+            float(self.param("beta_estimate_max_deg", 30.0))
+        )
+        self.beta_min_speed = float(
+            self.param("beta_estimate_min_speed_mps", 0.35)
+        )
 
         self.accel_time = float(self.param("accel_time_s", 0.78))
         self.accel_torque_max = float(
@@ -141,24 +192,24 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
         self.accel_max_yaw_correction = float(
             self.param("accel_max_yaw_correction_nm", 0.08)
         )
-        self.pulse_duration = float(self.param("pulse_duration_s", 0.16))
+        self.pulse_duration = float(self.param("pulse_duration_s", 0.82))
         self.pulse_torque = [
             float(value)
             for value in self.param(
-                "pulse_torque_nm", [-0.32, 0.65, -0.24, 0.62]
+                "pulse_torque_nm", [-0.128, 0.260, -0.096, 0.248]
             )
         ]
-        self.transition_time = float(self.param("transition_time_s", 0.24))
+        self.transition_time = float(self.param("transition_time_s", 0.05))
 
         self.hold_feedforward = [
             float(value)
             for value in self.param(
                 "hold_feedforward_nm",
                 [
-                    -0.0847406096744224,
-                    0.147028287360532,
-                    -0.142627453057868,
-                    0.454569644219509,
+                    0.0796263991840194,
+                    -0.555616494418756,
+                    0.614939850009095,
+                    0.575811875532933,
                 ],
             )
         ]
@@ -167,10 +218,10 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
             for value in self.param(
                 "speed_distribution_weights",
                 [
-                    1.77008112606801,
-                    1.76275243840561,
-                    0.233583217763192,
-                    0.233583217763192,
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0,
                 ],
             )
         ]
@@ -179,10 +230,10 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
             for value in self.param(
                 "yaw_distribution_vector",
                 [
-                    -1.76641678223681,
-                    1.76641678223681,
-                    -0.233583217763192,
-                    0.233583217763192,
+                    -1.0,
+                    1.0,
+                    -1.0,
+                    1.0,
                 ],
             )
         ]
@@ -243,6 +294,18 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
             raise ValueError("torque limit and slew rate must be positive")
         if self.vehicle_mass <= 0.0 or self.wheel_radius <= 0.0:
             raise ValueError("vehicle mass and wheel radius must be positive")
+        filter_taus = (
+            self.imu_filter_tau,
+            self.imu_derivative_tau,
+            self.speed_filter_tau,
+            self.speed_derivative_tau,
+        )
+        if any(value < 0.0 for value in filter_taus):
+            raise ValueError("sensor filter time constants must be non-negative")
+        if self.beta_min >= self.beta_max or self.beta_min_speed < 0.0:
+            raise ValueError("invalid sideslip estimator bounds")
+        if self.beta_kp < 0.0 or self.max_beta_yaw_ref_correction < 0.0:
+            raise ValueError("sideslip outer-loop gains must be non-negative")
         if self.speed_integral_limit <= 0.0 or self.yaw_integral_limit <= 0.0:
             raise ValueError("integral limits must be positive")
         if self.max_run_time <= 0.0:
@@ -260,11 +323,21 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
     def start_test_locked(self, now):
         success, message = super().start_test_locked(now)
         if success:
-            self.previous_yaw_sample = None
-            self.previous_yaw_sample_stamp = None
-            self.previous_speed_sample = None
-            self.previous_speed_sample_stamp = None
+            self.previous_yaw_filtered = 0.0
+            self.previous_speed_filtered = 0.0
+            self.yaw_filter_stamp = None
+            self.speed_filter_stamp = None
+            self.yaw_rate = 0.0
+            self.yaw_rate_derivative = 0.0
+            self.odom_speed = 0.0
             self.speed_derivative = 0.0
+            self.accel_x_bias = 0.0
+            self.accel_y_bias = 0.0
+            self.accel_x = 0.0
+            self.accel_y = 0.0
+            self.accel_x_calibration_samples = []
+            self.accel_y_calibration_samples = []
+            self.beta_estimate = 0.0
             self.speed_integral = 0.0
             self.yaw_integral = 0.0
             self.last_speed_ref = 0.0
@@ -275,71 +348,111 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
             self.last_raw_command = [0.0, 0.0, 0.0, 0.0]
         return success, message
 
-    def update_sensor_filters(self, _dt):
-        """Compatibility no-op: this controller intentionally has no filters."""
+    @staticmethod
+    def low_pass(previous, sample, dt, time_constant):
+        if time_constant <= 0.0:
+            return sample
+        alpha = dt / (time_constant + dt)
+        return previous + alpha * (sample - previous)
 
     def imu_callback(self, msg):
         now = self.get_clock().now()
         raw = float(msg.angular_velocity.z)
+        accel_x_raw = float(msg.linear_acceleration.x)
+        accel_y_raw = float(msg.linear_acceleration.y)
         with self.lock:
             self.last_imu_stamp = now
             self.imu_raw = raw
+            self.accel_x_raw = accel_x_raw
+            self.accel_y_raw = accel_y_raw
             if self.phase == self.PHASE_CALIBRATE:
                 if math.isfinite(raw):
                     self.imu_calibration_samples.append(raw)
+                if math.isfinite(accel_x_raw):
+                    self.accel_x_calibration_samples.append(accel_x_raw)
+                if math.isfinite(accel_y_raw):
+                    self.accel_y_calibration_samples.append(accel_y_raw)
                 self.yaw_rate = 0.0
                 self.yaw_rate_derivative = 0.0
-                self.previous_yaw_sample = None
-                self.previous_yaw_sample_stamp = None
+                self.previous_yaw_filtered = 0.0
+                self.yaw_filter_stamp = now
+                self.accel_x = 0.0
+                self.accel_y = 0.0
                 return
-            if not math.isfinite(raw):
+            if not all(
+                math.isfinite(value)
+                for value in (raw, accel_x_raw, accel_y_raw)
+            ):
                 self.yaw_rate = raw
                 self.yaw_rate_derivative = raw
+                self.accel_x = accel_x_raw
+                self.accel_y = accel_y_raw
                 return
 
             corrected = self.imu_yaw_sign * (raw - self.imu_bias)
-            derivative = 0.0
-            if (
-                self.previous_yaw_sample is not None
-                and self.previous_yaw_sample_stamp is not None
-            ):
-                sample_dt = self.elapsed(now, self.previous_yaw_sample_stamp)
-                if sample_dt > 1.0e-6:
-                    derivative = (
-                        corrected - self.previous_yaw_sample
-                    ) / sample_dt
-            self.yaw_rate = corrected
-            self.yaw_rate_derivative = derivative
-            self.previous_yaw_sample = corrected
-            self.previous_yaw_sample_stamp = now
+            sample_dt = 1.0 / self.control_rate_hz
+            if self.yaw_filter_stamp is not None:
+                sample_dt = self.clamp(
+                    self.elapsed(now, self.yaw_filter_stamp), 1.0e-4, 0.10
+                )
+            filtered = self.low_pass(
+                self.yaw_rate, corrected, sample_dt, self.imu_filter_tau
+            )
+            raw_derivative = (
+                (filtered - self.previous_yaw_filtered) / sample_dt
+            )
+            self.yaw_rate_derivative = self.low_pass(
+                self.yaw_rate_derivative,
+                raw_derivative,
+                sample_dt,
+                self.imu_derivative_tau,
+            )
+            self.yaw_rate = filtered
+            self.previous_yaw_filtered = filtered
+            self.yaw_filter_stamp = now
+            self.accel_x = self.accel_x_sign * (
+                accel_x_raw - self.accel_x_bias
+            )
+            self.accel_y = self.accel_y_sign * (
+                accel_y_raw - self.accel_y_bias
+            )
 
     def odom_callback(self, msg):
         now = self.get_clock().now()
         q = msg.pose.pose.orientation
         siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-        speed = max(0.0, float(msg.twist.twist.linear.x))
+        speed = math.hypot(
+            float(msg.twist.twist.linear.x),
+            float(msg.twist.twist.linear.y),
+        )
         with self.lock:
             self.last_odom_stamp = now
             self.odom_x = float(msg.pose.pose.position.x)
             self.odom_y = float(msg.pose.pose.position.y)
             self.odom_yaw = math.atan2(siny_cosp, cosy_cosp)
             self.odom_speed_raw = speed
-            self.odom_speed = speed
 
-            derivative = 0.0
-            if (
-                self.previous_speed_sample is not None
-                and self.previous_speed_sample_stamp is not None
-            ):
-                sample_dt = self.elapsed(now, self.previous_speed_sample_stamp)
-                if sample_dt > 1.0e-6:
-                    derivative = (
-                        speed - self.previous_speed_sample
-                    ) / sample_dt
-            self.speed_derivative = derivative
-            self.previous_speed_sample = speed
-            self.previous_speed_sample_stamp = now
+            sample_dt = 1.0 / self.control_rate_hz
+            if self.speed_filter_stamp is not None:
+                sample_dt = self.clamp(
+                    self.elapsed(now, self.speed_filter_stamp), 1.0e-4, 0.10
+                )
+            filtered = self.low_pass(
+                self.odom_speed, speed, sample_dt, self.speed_filter_tau
+            )
+            raw_derivative = (
+                (filtered - self.previous_speed_filtered) / sample_dt
+            )
+            self.speed_derivative = self.low_pass(
+                self.speed_derivative,
+                raw_derivative,
+                sample_dt,
+                self.speed_derivative_tau,
+            )
+            self.odom_speed = filtered
+            self.previous_speed_filtered = filtered
+            self.speed_filter_stamp = now
 
     def control_callback(self):
         now = self.get_clock().now()
@@ -360,6 +473,29 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
             if self.phase != self.PHASE_ABORT:
                 self.apply_safety_checks(now, dt)
 
+            if self.phase == self.PHASE_CALIBRATE:
+                self.beta_estimate = 0.0
+            elif (
+                self.odom_speed > self.beta_min_speed
+                and all(
+                    math.isfinite(value)
+                    for value in (
+                        self.accel_x,
+                        self.accel_y,
+                        self.yaw_rate,
+                    )
+                )
+            ):
+                beta_dot = (
+                    self.accel_y * math.cos(self.beta_estimate)
+                    - self.accel_x * math.sin(self.beta_estimate)
+                ) / self.odom_speed - self.yaw_rate
+                self.beta_estimate = self.clamp(
+                    self.beta_estimate + dt * beta_dot,
+                    self.beta_min,
+                    self.beta_max,
+                )
+
             phase_time = self.elapsed(now, self.phase_start)
             raw_command = [0.0, 0.0, 0.0, 0.0]
             speed_ref = 0.0
@@ -375,27 +511,47 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
                     phase_time >= self.calibration_time
                     and len(self.imu_calibration_samples)
                     >= self.calibration_min_samples
+                    and len(self.accel_x_calibration_samples)
+                    >= self.calibration_min_samples
+                    and len(self.accel_y_calibration_samples)
+                    >= self.calibration_min_samples
                 ):
                     self.imu_bias = sum(self.imu_calibration_samples) / len(
                         self.imu_calibration_samples
                     )
+                    self.accel_x_bias = sum(
+                        self.accel_x_calibration_samples
+                    ) / len(self.accel_x_calibration_samples)
+                    self.accel_y_bias = sum(
+                        self.accel_y_calibration_samples
+                    ) / len(self.accel_y_calibration_samples)
                     self.yaw_rate = 0.0
                     self.yaw_rate_derivative = 0.0
-                    self.previous_yaw_sample = None
-                    self.previous_yaw_sample_stamp = None
+                    self.previous_yaw_filtered = 0.0
+                    self.yaw_filter_stamp = now
                     self.speed_derivative = 0.0
-                    self.previous_speed_sample = self.odom_speed
-                    self.previous_speed_sample_stamp = self.last_odom_stamp
+                    self.previous_speed_filtered = self.odom_speed
+                    self.speed_filter_stamp = self.last_odom_stamp
+                    self.beta_estimate = 0.0
                     self.enter_phase(self.PHASE_ACCELERATE, now)
                     self.get_logger().info(
-                        "IMU bias calibrated from %d raw messages: %.6f rad/s"
-                        % (len(self.imu_calibration_samples), self.imu_bias)
+                        "Stationary IMU calibration (%d samples): gyro="
+                        "%.6f rad/s, accel_x=%.6f, accel_y=%.6f m/s^2"
+                        % (
+                            len(self.imu_calibration_samples),
+                            self.imu_bias,
+                            self.accel_x_bias,
+                            self.accel_y_bias,
+                        )
                     )
                 elif phase_time >= self.calibration_timeout:
                     self.enter_abort(
-                        "IMU calibration received only %d/%d messages"
+                        "IMU calibration received gyro/x/y samples "
+                        "%d/%d/%d (need %d each)"
                         % (
                             len(self.imu_calibration_samples),
+                            len(self.accel_x_calibration_samples),
+                            len(self.accel_y_calibration_samples),
                             self.calibration_min_samples,
                         )
                     )
@@ -460,7 +616,13 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
                     self.enter_phase(self.PHASE_STOP, now)
                 else:
                     speed_ref = self.target_speed
-                    yaw_ref = self.nominal_yaw_rate
+                    beta_yaw_correction = self.clamp(
+                        self.beta_kp
+                        * (self.beta_estimate - self.beta_desired),
+                        -self.max_beta_yaw_ref_correction,
+                        self.max_beta_yaw_ref_correction,
+                    )
+                    yaw_ref = self.nominal_yaw_rate + beta_yaw_correction
                     speed_error = speed_ref - self.odom_speed
                     yaw_error = yaw_ref - self.yaw_rate
                     speed_correction = self.clamp(
@@ -542,15 +704,18 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
     def publish_diagnostics(self):
         command = self.previous_command
         labels = (
-            "phase,imu_raw,imu_bias,yaw_rate_unfiltered,"
-            "yaw_rate_derivative_raw,yaw_ref,yaw_error,yaw_turns,"
-            "odom_speed_unfiltered,odom_speed_derivative_raw,speed_ref,"
-            "speed_error,speed_integral,yaw_integral,speed_correction,"
-            "yaw_correction,torque_FL,torque_FR,torque_RL,torque_RR"
+            "phase,imu_raw,imu_bias,yaw_rate_filtered,"
+            "yaw_rate_derivative_filtered,yaw_ref,yaw_error,yaw_turns,"
+            "odom_speed_raw,odom_speed_filtered,"
+            "odom_speed_derivative_filtered,speed_ref,speed_error,"
+            "speed_integral,yaw_integral,speed_correction,yaw_correction,"
+            "accel_x_raw,accel_y_raw,accel_x_bias,accel_y_bias,"
+            "accel_x_corrected,accel_y_corrected,beta_estimate,"
+            "torque_FL,torque_FR,torque_RL,torque_RR"
         )
         msg = Float64MultiArray()
         msg.layout.dim = [
-            MultiArrayDimension(label=labels, size=20, stride=20)
+            MultiArrayDimension(label=labels, size=28, stride=28)
         ]
         msg.data = [
             float(self.phase),
@@ -561,6 +726,7 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
             self.last_yaw_ref,
             self.last_yaw_error,
             self.yaw_hold / (2.0 * math.pi),
+            self.odom_speed_raw,
             self.odom_speed,
             self.speed_derivative,
             self.last_speed_ref,
@@ -569,6 +735,13 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
             self.yaw_integral,
             self.last_speed_correction,
             self.last_yaw_correction,
+            self.accel_x_raw,
+            self.accel_y_raw,
+            self.accel_x_bias,
+            self.accel_y_bias,
+            self.accel_x,
+            self.accel_y,
+            self.beta_estimate,
         ] + list(command)
         self.diag_pub.publish(msg)
 
@@ -585,19 +758,28 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
                 "phase",
                 "imu_raw_radps",
                 "imu_bias_radps",
-                "yaw_rate_unfiltered_radps",
-                "yaw_rate_derivative_raw_radps2",
+                "yaw_rate_filtered_radps",
+                "yaw_rate_derivative_filtered_radps2",
                 "yaw_ref_radps",
                 "yaw_error_radps",
                 "yaw_turns",
-                "odom_speed_unfiltered_mps",
-                "odom_speed_derivative_raw_mps2",
+                "odom_speed_raw_mps",
+                "odom_speed_filtered_mps",
+                "odom_speed_derivative_filtered_mps2",
                 "speed_ref_mps",
                 "speed_error_mps",
                 "speed_integral_m",
                 "yaw_integral_rad",
                 "speed_correction_nm",
                 "yaw_correction_nm",
+                "accel_x_raw_mps2",
+                "accel_y_raw_mps2",
+                "accel_x_bias_mps2",
+                "accel_y_bias_mps2",
+                "accel_x_corrected_mps2",
+                "accel_y_corrected_mps2",
+                "beta_estimate_rad",
+                "beta_estimate_deg",
                 "raw_FL_nm",
                 "raw_FR_nm",
                 "raw_RL_nm",
@@ -632,6 +814,7 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
                 self.last_yaw_ref,
                 self.last_yaw_error,
                 self.yaw_hold / (2.0 * math.pi),
+                self.odom_speed_raw,
                 self.odom_speed,
                 self.speed_derivative,
                 self.last_speed_ref,
@@ -640,6 +823,14 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
                 self.yaw_integral,
                 self.last_speed_correction,
                 self.last_yaw_correction,
+                self.accel_x_raw,
+                self.accel_y_raw,
+                self.accel_x_bias,
+                self.accel_y_bias,
+                self.accel_x,
+                self.accel_y,
+                self.beta_estimate,
+                math.degrees(self.beta_estimate),
             ]
             + list(self.last_raw_command)
             + list(command)

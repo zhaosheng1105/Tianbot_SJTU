@@ -3,7 +3,7 @@
 <package format="3">
   <name>tianbot_drift_test</name>
   <version>0.3.0</version>
-  <description>MATLAB-derived IMU, odometry, and independent 4WID drift controllers for the Tianbot DYN chassis.</description>
+  <description>MATLAB-derived independent 4WID drift controller for the Tianbot DYN chassis.</description>
   <maintainer email="tianbot@todo.todo">tianbot</maintainer>
   <license>BSD-3-Clause</license>
 

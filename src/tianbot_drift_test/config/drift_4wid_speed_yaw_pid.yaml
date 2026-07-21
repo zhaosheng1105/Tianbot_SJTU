@@ -27,41 +27,53 @@ drift_4wid_speed_yaw_pid:
     control_rate_hz: 100.0
     target_radius_m: 1.0
     target_speed_mps: 2.0
-    target_turns: 3.0
+    target_turns: 5.0
     vehicle_mass_kg: 7.0
     wheel_radius_m: 0.048
 
-    # Only stationary gyro-bias subtraction is retained. There are deliberately
-    # no IMU, yaw-rate derivative, odom-speed, or speed-derivative filters.
-    calibration_time_s: 0.40
-    calibration_timeout_s: 2.0
+    # MATLAB sensor processing: stationary gyro/accelerometer calibration,
+    # then first-order signal and derivative filters.
+    calibration_time_s: 2.00
+    calibration_timeout_s: 3.0
     calibration_min_samples: 20
+    imu_filter_tau_s: 0.020
+    imu_derivative_tau_s: 0.050
+    speed_filter_tau_s: 0.060
+    speed_derivative_tau_s: 0.100
+    accel_x_sign: 1.0
+    accel_y_sign: 1.0
+
+    # Acceleration-based sideslip estimate and beta-to-yaw-reference outer loop.
+    beta_desired_deg: -30.0
+    beta_kp_radps_per_rad: 1.0
+    max_beta_yaw_ref_correction_radps: 0.40
+    beta_estimate_min_deg: -70.0
+    beta_estimate_max_deg: 30.0
+    beta_estimate_min_speed_mps: 0.35
 
     # Acceleration and open-loop initiation from the MATLAB controller.
     accel_time_s: 0.78
     accel_torque_max_nm: 0.54
     accel_max_yaw_correction_nm: 0.08
-    pulse_duration_s: 0.16
-    pulse_torque_nm: [-0.32, 0.65, -0.24, 0.62]
-    transition_time_s: 0.24
+    pulse_duration_s: 0.82
+    pulse_torque_nm: [-0.128, 0.260, -0.096, 0.248]
+    transition_time_s: 0.05
 
     # mu=0.75 nonlinear equilibrium solved offline in MATLAB. These are four
     # independent values; the ROS node does not solve the tire model online.
-    hold_feedforward_nm: [-0.0847406096744224, 0.147028287360532,
-                          -0.142627453057868, 0.454569644219509]
-    speed_distribution_weights: [1.77008112606801, 1.76275243840561,
-                                 0.233583217763192, 0.233583217763192]
-    yaw_distribution_vector: [-1.76641678223681, 1.76641678223681,
-                              -0.233583217763192, 0.233583217763192]
+    hold_feedforward_nm: [0.0796263991840194, -0.555616494418756,
+                          0.614939850009095, 0.575811875532933]
+    speed_distribution_weights: [1.0, 1.0, 1.0, 1.0]
+    yaw_distribution_vector: [-1.0, 1.0, -1.0, 1.0]
 
-    # Raw odom-speed PID. The D term is a direct sample-to-sample difference.
+    # Filtered odom-speed PID.
     speed_kp_nm_per_mps: 0.24
     speed_ki_nm_per_m: 0.10
     speed_kd_nm_per_mps2: 0.012
     max_speed_correction_nm: 0.22
     speed_integral_limit_m: 1.2
 
-    # Raw bias-corrected IMU yaw-rate PID. No low-pass filter is applied.
+    # Filtered, bias-corrected IMU yaw-rate PID.
     yaw_kp_nm_per_radps: 0.30
     yaw_ki_nm_per_rad: 0.080
     yaw_kd_nm_per_radps2: 0.025

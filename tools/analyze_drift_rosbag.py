@@ -217,11 +217,7 @@ DECODERS = {
     "/tianbot/motor_feedback": decode_motor_feedback,
 }
 
-DIAGNOSTIC_TOPICS = (
-    "/drift_4wid_speed_yaw_pid/diagnostics",
-    "/drift_imu_odom_pid/diagnostics",
-    "/drift_imu_only_pid/diagnostics",
-)
+DIAGNOSTIC_TOPIC = "/drift_4wid_speed_yaw_pid/diagnostics"
 
 
 def locate_db3(path):
@@ -256,13 +252,11 @@ def load_bag(db_path):
             }
             for row in topic_rows
         }
-        diagnostic_topic = next(
-            (name for name in DIAGNOSTIC_TOPICS if name in topics), None
-        )
-        if diagnostic_topic is None:
+        diagnostic_topic = DIAGNOSTIC_TOPIC
+        if diagnostic_topic not in topics:
             raise ValueError(
-                "bag contains none of the supported diagnostics topics: %s"
-                % ", ".join(DIAGNOSTIC_TOPICS)
+                "bag is missing required diagnostics topic: %s"
+                % diagnostic_topic
             )
         decoders = dict(DECODERS)
         decoders[diagnostic_topic] = decode_diagnostics
@@ -295,18 +289,27 @@ def load_bag(db_path):
             )
             for timestamp, payload in connection.execute(query, (topic_id,)):
                 item = decoder(payload)
-                if diagnostic_topic == "/drift_4wid_speed_yaw_pid/diagnostics":
-                    item.setdefault(
-                        "yaw_rate", item.get("yaw_rate_unfiltered", float("nan"))
-                    )
-                    item.setdefault(
-                        "yaw_rate_derivative",
+                item.setdefault(
+                    "yaw_rate",
+                    item.get(
+                        "yaw_rate_filtered",
+                        item.get("yaw_rate_unfiltered", float("nan")),
+                    ),
+                )
+                item.setdefault(
+                    "yaw_rate_derivative",
+                    item.get(
+                        "yaw_rate_derivative_filtered",
                         item.get("yaw_rate_derivative_raw", float("nan")),
-                    )
-                    item.setdefault(
-                        "odom_speed",
+                    ),
+                )
+                item.setdefault(
+                    "odom_speed",
+                    item.get(
+                        "odom_speed_filtered",
                         item.get("odom_speed_unfiltered", float("nan")),
-                    )
+                    ),
+                )
                 item["timestamp_ns"] = timestamp
                 item["bag_time_s"] = (timestamp - first_timestamp) * 1.0e-9
                 rows.append(item)
@@ -580,9 +583,6 @@ def within(rows, start, end):
 def calculate_metrics(bag, recorded_parameters):
     data = bag["data"]
     diagnostics = get_diagnostics(bag)
-    is_4wid = (
-        bag["diagnostic_topic"] == "/drift_4wid_speed_yaw_pid/diagnostics"
-    )
     intervals = phase_intervals(diagnostics)
     active_start = intervals[0]["start_s"]
     active_end = intervals[-1]["end_s"]
@@ -608,16 +608,8 @@ def calculate_metrics(bag, recorded_parameters):
 
     torque_cap = float(recorded_parameters.get("software_torque_max_nm", 0.0) or 0.0)
     slew_limit = float(recorded_parameters.get("command_slew_nmps", 0.0) or 0.0)
-    yaw_kp = float(recorded_parameters.get("yaw_kp_nm_per_radps", 0.0) or 0.0)
-    yaw_kd = float(recorded_parameters.get("yaw_kd_nm_per_radps2", 0.0) or 0.0)
     maximum_yaw_correction = float(
         recorded_parameters.get("max_yaw_correction_nm", 0.0) or 0.0
-    )
-    hold_left = float(
-        recorded_parameters.get("hold_left_feedforward_nm", 0.0) or 0.0
-    )
-    hold_right = float(
-        recorded_parameters.get("hold_right_feedforward_nm", 0.0) or 0.0
     )
     all_commands = [row["t_ff"] for row in hold_commands]
     saturation_count = 0
@@ -642,37 +634,21 @@ def calculate_metrics(bag, recorded_parameters):
             if any(rate >= 0.95 * slew_limit for rate in rates):
                 slew_count += 1
 
-    if is_4wid:
-        # This controller records the final yaw PID correction after the
-        # integral term and clamp. Use the recorded value instead of trying
-        # to reconstruct a different controller from Kp/Kd alone.
-        raw_corrections = finite_values(
-            [
-                row.get("yaw_correction", float("nan"))
-                for row in hold_diagnostics
-            ]
-        )
-    else:
-        raw_corrections = [
-            yaw_kp * (row.get("yaw_ref", 0.0) - row.get("yaw_rate", 0.0))
-            - yaw_kd * row.get("yaw_rate_derivative", 0.0)
+    # This controller records the final yaw PID correction after the integral
+    # term and clamp, so no controller reconstruction is needed.
+    raw_corrections = finite_values(
+        [
+            row.get("yaw_correction", float("nan"))
             for row in hold_diagnostics
         ]
+    )
     correction_saturation_fraction = 0.0
     if maximum_yaw_correction > 0.0 and raw_corrections:
         correction_saturation_fraction = sum(
             abs(value) >= 0.98 * maximum_yaw_correction
             for value in raw_corrections
         ) / len(raw_corrections)
-    predicted_torque_limit_fraction = float("nan") if is_4wid else 0.0
-    if not is_4wid and torque_cap > 0.0 and raw_corrections:
-        hold_base = 0.5 * (hold_left + hold_right)
-        hold_difference = 0.5 * (hold_right - hold_left)
-        predicted_torque_limit_fraction = sum(
-            abs(hold_base - hold_difference - max(-maximum_yaw_correction, min(maximum_yaw_correction, correction))) >= torque_cap
-            or abs(hold_base + hold_difference + max(-maximum_yaw_correction, min(maximum_yaw_correction, correction))) >= torque_cap
-            for correction in raw_corrections
-        ) / len(raw_corrections)
+    predicted_torque_limit_fraction = float("nan")
 
     x_values = [row["x"] for row in hold_odom]
     y_values = [row["y"] for row in hold_odom]
@@ -722,7 +698,7 @@ def calculate_metrics(bag, recorded_parameters):
 
     return {
         "diagnostic_topic": bag["diagnostic_topic"],
-        "controller_type": "4wid_speed_yaw_pid" if is_4wid else "matlab_drift_pid",
+        "controller_type": "4wid_speed_yaw_pid",
         "bag_duration_s": bag["duration_s"],
         "active_start_s": active_start,
         "active_end_s": active_end,
@@ -1106,12 +1082,7 @@ def make_plots(output_directory, bag, metrics):
 
     yaw_series = [
         {
-            "label": (
-                "unfiltered IMU yaw rate"
-                if bag["diagnostic_topic"]
-                == "/drift_4wid_speed_yaw_pid/diagnostics"
-                else "filtered IMU yaw rate"
-            ),
+            "label": "controller IMU yaw rate",
             "color": "#2563eb",
             "points": [(row["bag_time_s"] - offset, row.get("yaw_rate", float("nan"))) for row in diagnostics],
         },
@@ -1271,22 +1242,13 @@ def write_summary_markdown(path, bag, metrics, differences):
             )
         )
     lines.extend(["", "## Interpretation", ""])
-    if metrics["controller_type"] == "4wid_speed_yaw_pid":
-        lines.extend(
-            [
-                "- This recording uses the four-wheel independent speed/yaw PID. The plotted yaw rate, odom speed, and their derivatives are the controller's unfiltered values.",
-                "- Yaw-correction saturation is calculated from the recorded yaw PID correction, including its integral term and clamp.",
-                "- Each wheel command is generated from its own feedforward value plus the configured speed and yaw distribution weights.",
-            ]
-        )
-    else:
-        lines.extend(
-            [
-                "- The yaw correction is reconstructed from the recorded yaw rate and configured proportional/derivative gains.",
-                "- A high slew-limit fraction together with a large yaw-rate standard deviation can indicate limit-cycle behavior rather than smooth steady-state tracking.",
-                "- Increase steady longitudinal drive with the left/right hold feedforward pair; do not use very large yaw Kp/Kd as a substitute for base drive torque.",
-            ]
-        )
+    lines.extend(
+        [
+            "- This recording uses the four-wheel independent speed/yaw PID. New-format recordings contain the MATLAB-style filtered yaw rate, odom speed, and derivatives; legacy unfiltered recordings remain supported.",
+            "- Yaw-correction saturation is calculated from the recorded yaw PID correction, including its integral term and clamp.",
+            "- Each wheel command is generated from its own feedforward value plus the configured speed and yaw distribution weights.",
+        ]
+    )
     lines.extend(
         [
             "- Motor speed signs are plotted exactly as reported by the four motor controllers. Opposite signs on the two vehicle sides can be caused by mirrored motor installation and are not converted to absolute values in the raw-data plot.",
@@ -1368,15 +1330,10 @@ def analyze(args):
     output_directory.mkdir(parents=True, exist_ok=True)
 
     bag = load_bag(db_path)
-    default_yaml_names = {
-        "/drift_4wid_speed_yaw_pid/diagnostics": "drift_4wid_speed_yaw_pid.yaml",
-        "/drift_imu_odom_pid/diagnostics": "drift_imu_odom_pid.yaml",
-        "/drift_imu_only_pid/diagnostics": "drift_imu_only_pid.yaml",
-    }
     recorded_yaml = (
         Path(args.recorded_yaml).expanduser().resolve()
         if args.recorded_yaml
-        else bag_directory / default_yaml_names[bag["diagnostic_topic"]]
+        else bag_directory / "drift_4wid_speed_yaw_pid.yaml"
     )
     baseline_yaml = Path(args.baseline_yaml).expanduser().resolve() if args.baseline_yaml else None
     recorded_parameters = load_ros_parameter_yaml(recorded_yaml) if recorded_yaml.is_file() else {}

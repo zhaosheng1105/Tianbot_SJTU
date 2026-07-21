@@ -1,4 +1,4 @@
-"""Hardware ROS 2 ports of the two MATLAB no-steer drift controllers.
+"""Shared ROS 2 runtime and safety framework for the 4WID drift controller.
 
 The source MATLAB controller order is FL, FR, RL, RR.  Commands in this file
 stay in that logical order until ``motor_torque_signs`` is applied immediately
@@ -10,7 +10,6 @@ import math
 import os
 import threading
 
-import rclpy
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -22,10 +21,7 @@ from tianbot_core.srv import SetControlMode
 
 
 class MatlabDriftPid(Node):
-    """Run either the MATLAB IMU-only or IMU+odom controller on Tianbot."""
-
-    KIND_IMU_ONLY = "imu_only"
-    KIND_IMU_ODOM = "imu_odom"
+    """Provide ROS interfaces, sequencing, and safety for drift control."""
 
     PHASE_IDLE = 0
     PHASE_CALIBRATE = 1
@@ -45,21 +41,12 @@ class MatlabDriftPid(Node):
         PHASE_ABORT: "abort",
     }
 
-    def __init__(self, controller_kind, node_name=None):
-        if controller_kind not in (self.KIND_IMU_ONLY, self.KIND_IMU_ODOM):
-            raise ValueError("unsupported controller kind: %s" % controller_kind)
-
-        node_name = node_name or "drift_%s_pid" % controller_kind
+    def __init__(self, node_name):
         super().__init__(node_name)
-        self.controller_kind = controller_kind
-        self.uses_odom = controller_kind == self.KIND_IMU_ODOM
         self.lock = threading.RLock()
 
         self._read_common_parameters()
-        if self.uses_odom:
-            self._read_imu_odom_parameters()
-        else:
-            self._read_imu_only_parameters()
+        self._read_controller_parameters()
         self._validate_parameters()
 
         self.phase = self.PHASE_IDLE
@@ -114,14 +101,12 @@ class MatlabDriftPid(Node):
         self.imu_sub = self.create_subscription(
             Imu, self.imu_topic, self.imu_callback, qos_profile_sensor_data
         )
-        self.odom_sub = None
-        if self.uses_odom:
-            self.odom_sub = self.create_subscription(
-                Odometry,
-                self.odom_topic,
-                self.odom_callback,
-                qos_profile_sensor_data,
-            )
+        self.odom_sub = self.create_subscription(
+            Odometry,
+            self.odom_topic,
+            self.odom_callback,
+            qos_profile_sensor_data,
+        )
         self.mode_status_sub = self.create_subscription(
             RoverMotionModeStatus,
             self.mode_status_topic,
@@ -174,16 +159,12 @@ class MatlabDriftPid(Node):
             )
 
     def feedback_description(self):
-        if self.uses_odom:
-            return "IMU yaw-rate PD + odom speed P + odom radius PD"
-        return "IMU yaw-rate PD only"
+        return "four-wheel-independent drift feedback"
 
     def _read_common_parameters(self):
         self.control_rate_hz = float(self.param("control_rate_hz", 100.0))
         self.imu_topic = self.param("imu_topic", "/tianbot/imu")
-        self.odom_topic = "/tianbot/odom"
-        if self.uses_odom:
-            self.odom_topic = self.param("odom_topic", self.odom_topic)
+        self.odom_topic = self.param("odom_topic", "/tianbot/odom")
         self.cmd_topic = self.param(
             "wheel_torque_command_topic", "/tianbot/wheel_mit_cmd"
         )
@@ -272,18 +253,7 @@ class MatlabDriftPid(Node):
             self.param("log_directory", "~/.ros/drift_test_logs")
         )
 
-    def _read_imu_only_parameters(self):
-        self.accel_time = float(self.param("accel_time_s", 0.54))
-        self.accel_rise_time = float(self.param("accel_rise_time_s", 0.12))
-        self.accel_torque = float(self.param("accel_torque_nm", 0.100))
-        self.yaw_kp = float(
-            self.param("yaw_kp_nm_per_radps", 0.210315883222)
-        )
-        self.yaw_kd = float(
-            self.param("yaw_kd_nm_per_radps2", 0.0249765583251)
-        )
-
-    def _read_imu_odom_parameters(self):
+    def _read_controller_parameters(self):
         self.accel_time = float(self.param("accel_time_s", 0.50))
         self.accel_feedforward = float(
             self.param("accel_feedforward_nm", 0.140)
@@ -540,11 +510,10 @@ class MatlabDriftPid(Node):
             return False, "IMU data"
         if self.elapsed(now, self.last_imu_stamp) > self.sensor_timeout:
             return False, "fresh IMU data"
-        if self.uses_odom:
-            if self.last_odom_stamp is None:
-                return False, "odometry data"
-            if self.elapsed(now, self.last_odom_stamp) > self.sensor_timeout:
-                return False, "fresh odometry data"
+        if self.last_odom_stamp is None:
+            return False, "odometry data"
+        if self.elapsed(now, self.last_odom_stamp) > self.sensor_timeout:
+            return False, "fresh odometry data"
         return True, ""
 
     def control_callback(self):
@@ -599,10 +568,7 @@ class MatlabDriftPid(Node):
 
             elif self.phase == self.PHASE_ACCELERATE:
                 yaw_ref = 0.0
-                if self.uses_odom:
-                    raw_command = self.imu_odom_accel_command(phase_time)
-                else:
-                    raw_command = self.imu_only_accel_command(phase_time)
+                raw_command = self.legacy_accel_command(phase_time)
                 if phase_time >= self.accel_time:
                     self.enter_phase(self.PHASE_INITIATE, now)
 
@@ -611,30 +577,25 @@ class MatlabDriftPid(Node):
                     self.clamp(phase_time / self.pulse_duration, 0.0, 1.0)
                 )
                 yaw_ref = self.nominal_yaw_rate * ramp
-                trim = 0.0
-                if self.uses_odom:
-                    trim = self.clamp(
-                        self.pulse_speed_kp * (self.target_speed - self.odom_speed),
-                        -0.06,
-                        0.06,
-                    )
+                trim = self.clamp(
+                    self.pulse_speed_kp * (self.target_speed - self.odom_speed),
+                    -0.06,
+                    0.06,
+                )
                 raw_command = self.pulse_command(trim)
                 if phase_time >= self.pulse_duration:
                     self.enter_phase(self.PHASE_HOLD, now)
 
             elif self.phase == self.PHASE_HOLD:
-                if self.uses_odom:
-                    if (
-                        self.circle_center is None
-                        and phase_time >= self.center_lock_delay
-                    ):
-                        self.set_circle_center_from_odom()
-                    if self.circle_center is not None:
-                        self.update_radius_estimate(dt)
-                        self.yaw_hold += self.direction * self.yaw_rate * dt
-                    radius_bias = self.calculate_radius_bias(phase_time)
-                else:
+                if (
+                    self.circle_center is None
+                    and phase_time >= self.center_lock_delay
+                ):
+                    self.set_circle_center_from_odom()
+                if self.circle_center is not None:
+                    self.update_radius_estimate(dt)
                     self.yaw_hold += self.direction * self.yaw_rate * dt
+                radius_bias = self.calculate_radius_bias(phase_time)
 
                 if self.yaw_hold >= 2.0 * math.pi * self.target_turns:
                     raw_command = self.hold_feedforward_command()
@@ -684,11 +645,10 @@ class MatlabDriftPid(Node):
                 raw_derivative - self.yaw_rate_derivative
             )
 
-        if self.uses_odom:
-            speed_alpha = dt / (self.speed_filter_tau + dt)
-            self.odom_speed += speed_alpha * (
-                self.odom_speed_raw - self.odom_speed
-            )
+        speed_alpha = dt / (self.speed_filter_tau + dt)
+        self.odom_speed += speed_alpha * (
+            self.odom_speed_raw - self.odom_speed
+        )
 
     def apply_safety_checks(self, now, dt):
         if not math.isfinite(self.imu_raw) or not math.isfinite(self.yaw_rate):
@@ -697,19 +657,18 @@ class MatlabDriftPid(Node):
         if abs(self.yaw_rate) > self.max_abs_yaw_rate:
             self.enter_abort("yaw-rate safety limit exceeded")
             return
-        if self.uses_odom:
-            odom_values = (
-                self.odom_x,
-                self.odom_y,
-                self.odom_yaw,
-                self.odom_speed_raw,
-            )
-            if not all(math.isfinite(value) for value in odom_values):
-                self.enter_abort("non-finite odometry value")
-                return
-            if self.odom_speed > self.max_odom_speed:
-                self.enter_abort("odometry speed safety limit exceeded")
-                return
+        odom_values = (
+            self.odom_x,
+            self.odom_y,
+            self.odom_yaw,
+            self.odom_speed_raw,
+        )
+        if not all(math.isfinite(value) for value in odom_values):
+            self.enter_abort("non-finite odometry value")
+            return
+        if self.odom_speed > self.max_odom_speed:
+            self.enter_abort("odometry speed safety limit exceeded")
+            return
         if self.test_start is not None:
             if self.elapsed(now, self.test_start) > self.max_run_time:
                 self.enter_abort("maximum run time exceeded")
@@ -729,23 +688,7 @@ class MatlabDriftPid(Node):
         else:
             self.wrong_direction_duration = 0.0
 
-    def imu_only_accel_command(self, phase_time):
-        ramp = self.smoothstep(
-            self.clamp(phase_time / self.accel_rise_time, 0.0, 1.0)
-        )
-        base = self.accel_torque * ramp
-        correction = self.clamp(
-            self.yaw_kp * (-self.yaw_rate)
-            - self.yaw_kd * self.yaw_rate_derivative,
-            -0.06,
-            0.06,
-        )
-        return self.left_right_command(
-            base - self.direction * correction,
-            base + self.direction * correction,
-        )
-
-    def imu_odom_accel_command(self, phase_time):
+    def legacy_accel_command(self, phase_time):
         ramp = self.smoothstep(
             self.clamp(phase_time / self.accel_time, 0.0, 1.0)
         )
@@ -791,13 +734,11 @@ class MatlabDriftPid(Node):
             -self.max_yaw_correction,
             self.max_yaw_correction,
         )
-        speed_correction = 0.0
-        if self.uses_odom:
-            speed_correction = self.clamp(
-                self.speed_kp * (self.target_speed - self.odom_speed),
-                -self.max_speed_correction,
-                self.max_speed_correction,
-            )
+        speed_correction = self.clamp(
+            self.speed_kp * (self.target_speed - self.odom_speed),
+            -self.max_speed_correction,
+            self.max_speed_correction,
+        )
 
         base = 0.5 * (self.hold_left_ff + self.hold_right_ff)
         base += speed_correction
@@ -934,20 +875,20 @@ class MatlabDriftPid(Node):
             self.yaw_rate_derivative,
             self.last_yaw_ref,
             self.yaw_hold / (2.0 * math.pi),
-            self.odom_speed if self.uses_odom else float("nan"),
+            self.odom_speed,
             self.odom_radius_raw,
             self.odom_radius,
             self.radius_rate,
             self.last_radius_bias,
-            self.odom_x if self.uses_odom else float("nan"),
-            self.odom_y if self.uses_odom else float("nan"),
+            self.odom_x,
+            self.odom_y,
         ] + list(command)
         self.diag_pub.publish(msg)
 
     def open_log(self, now):
         os.makedirs(self.log_directory, exist_ok=True)
         stamp = now.nanoseconds * 1.0e-9
-        filename = "drift_%s_pid_%.3f.csv" % (self.controller_kind, stamp)
+        filename = "drift_controller_%.3f.csv" % stamp
         self.log_path = os.path.join(self.log_directory, filename)
         self.log_file = open(self.log_path, "w", newline="")
         self.log_writer = csv.writer(self.log_file)
@@ -998,10 +939,10 @@ class MatlabDriftPid(Node):
                 self.yaw_rate_derivative,
                 self.last_yaw_ref,
                 self.yaw_hold / (2.0 * math.pi),
-                self.odom_speed if self.uses_odom else float("nan"),
-                self.odom_x if self.uses_odom else float("nan"),
-                self.odom_y if self.uses_odom else float("nan"),
-                self.odom_yaw if self.uses_odom else float("nan"),
+                self.odom_speed,
+                self.odom_x,
+                self.odom_y,
+                self.odom_yaw,
                 self.odom_radius_raw,
                 self.odom_radius,
                 self.radius_rate,
@@ -1036,24 +977,3 @@ class MatlabDriftPid(Node):
     def smoothstep(value):
         value = min(max(value, 0.0), 1.0)
         return value * value * (3.0 - 2.0 * value)
-
-
-def run_controller(controller_kind, args=None):
-    rclpy.init(args=args)
-    node = MatlabDriftPid(controller_kind)
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.shutdown()
-        node.destroy_node()
-        rclpy.shutdown()
-
-
-def main_imu_only(args=None):
-    run_controller(MatlabDriftPid.KIND_IMU_ONLY, args=args)
-
-
-def main_imu_odom(args=None):
-    run_controller(MatlabDriftPid.KIND_IMU_ODOM, args=args)
