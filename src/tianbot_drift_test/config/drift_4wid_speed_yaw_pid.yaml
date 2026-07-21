@@ -27,53 +27,88 @@ drift_4wid_speed_yaw_pid:
     control_rate_hz: 100.0
     target_radius_m: 1.0
     target_speed_mps: 2.0
-    target_turns: 5.0
+    # The hardware-proven 6e50a74 test completed three turns.
+    target_turns: 3.0
     vehicle_mass_kg: 7.0
     wheel_radius_m: 0.048
 
-    # MATLAB sensor processing: stationary gyro/accelerometer calibration,
-    # then first-order signal and derivative filters.
-    calibration_time_s: 2.00
-    calibration_timeout_s: 3.0
+    # Preserve the 6e50a74 raw yaw/speed feedback behavior.  Acceleration is
+    # still calibrated because it is needed only by the beta estimator.
+    calibration_time_s: 0.40
+    calibration_timeout_s: 2.0
     calibration_min_samples: 20
-    imu_filter_tau_s: 0.020
-    imu_derivative_tau_s: 0.050
-    speed_filter_tau_s: 0.060
-    speed_derivative_tau_s: 0.100
+    imu_filter_tau_s: 0.0
+    imu_derivative_tau_s: 0.0
+    speed_filter_tau_s: 0.0
+    speed_derivative_tau_s: 0.0
+    odom_speed_use_magnitude: false
     accel_x_sign: 1.0
     accel_y_sign: 1.0
 
-    # Acceleration-based sideslip estimate and beta-to-yaw-reference outer loop.
-    beta_desired_deg: -30.0
-    beta_kp_radps_per_rad: 1.5
-    max_beta_yaw_ref_correction_radps: 0.40
+    # Robust-mu large-sideslip extension. Search and independent Monte Carlo
+    # cover mu=0.70/0.75/0.80/0.85; the old 2.0 rad/s yaw loop remains the
+    # anchor while beta control ramps in after capture.
+    beta_desired_deg: -20.0
+    beta_kp_radps_per_rad: 0.70
+    max_beta_yaw_ref_correction_radps: 0.30
     beta_estimate_min_deg: -70.0
     beta_estimate_max_deg: 30.0
     beta_estimate_min_speed_mps: 0.35
+    beta_outer_loop_delay_s: 0.45
+    beta_outer_loop_ramp_s: 0.55
+    # Bias-resistant steady-turn observation beta=atan2(-sign(r)*ax,
+    # sign(r)*ay), fused only after the hold phase has settled.
+    beta_accel_correction_gain_per_s: 2.0
+    beta_accel_correction_delay_s: 0.45
+    beta_accel_min_yaw_rate_radps: 0.80
 
-    # Acceleration and open-loop initiation from the MATLAB controller.
-    accel_time_s: 0.40
-    accel_torque_max_nm: 0.68
+    # Keep the exact hardware-proven 6e50a74 pulse. State-based fading adds a
+    # second guard if beta is captured early or yaw rises unexpectedly.
+    accel_time_s: 0.78
+    accel_torque_max_nm: 0.54
     accel_max_yaw_correction_nm: 0.08
-    pulse_duration_s: 0.82
-    pulse_torque_nm: [-0.128, 0.260, -0.096, 0.248]
-    transition_time_s: 0.05
+    pulse_duration_s: 0.16
+    pulse_torque_nm: [-0.320, 0.650, -0.240, 0.620]
+    pulse_beta_exit_deg: -10.0
+    pulse_beta_fade_width_deg: 4.0
+    pulse_yaw_limit_radps: 2.80
+    pulse_yaw_fade_width_radps: 0.80
+    transition_time_s: 0.24
 
-    # mu=0.75 nonlinear equilibrium solved offline in MATLAB. These are four
-    # independent values; the ROS node does not solve the tire model online.
-    hold_feedforward_nm: [0.0796263991840194, -0.555616494418756,
-                          0.614939850009095, 0.575811875532933]
-    speed_distribution_weights: [1.0, 1.0, 1.0, 1.0]
-    yaw_distribution_vector: [-1.0, 1.0, -1.0, 1.0]
+    # The base point stays close to the hardware-proven 6e50a74 hold torque.
+    # A beta PI continuously blends toward the mu=0.85, beta=-20 deg
+    # equilibrium instead of using one fragile fixed feedforward for all mu.
+    hold_feedforward_nm: [-0.0847406096744224, 0.147028287360532,
+                          -0.142627453057868, 0.454569644219509]
+    equilibrium_hold_feedforward_nm: [-0.252125924312589,
+                                      -0.507776705989045,
+                                       0.696931832501973,
+                                       0.577999899585275]
+    hold_blend_base: 0.20
+    hold_blend_kp_per_rad: 4.0
+    hold_blend_ki_per_rad_s: 4.0
+    hold_blend_integral_limit_rad_s: 1.0
+    # If both beta and yaw collapse after capture, briefly reuse the pulse;
+    # this recovered the rare mu=0.85 loss-of-drift Monte Carlo case.
+    recovery_delay_s: 0.80
+    recovery_ramp_s: 0.25
+    recovery_beta_start_deg: -14.0
+    recovery_beta_full_deg: -8.0
+    recovery_yaw_start_radps: 1.60
+    recovery_yaw_full_radps: 1.20
+    speed_distribution_weights: [1.77008112606801, 1.76275243840561,
+                                 0.233583217763192, 0.233583217763192]
+    yaw_distribution_vector: [-1.76641678223681, 1.76641678223681,
+                              -0.233583217763192, 0.233583217763192]
 
-    # Filtered odom-speed PID.
+    # Hardware-proven raw odom-speed PID.
     speed_kp_nm_per_mps: 0.24
     speed_ki_nm_per_m: 0.10
     speed_kd_nm_per_mps2: 0.012
     max_speed_correction_nm: 0.22
     speed_integral_limit_m: 1.2
 
-    # Filtered, bias-corrected IMU yaw-rate PID.
+    # Hardware-proven raw, bias-corrected IMU yaw-rate PID.
     yaw_kp_nm_per_radps: 0.30
     yaw_ki_nm_per_rad: 0.080
     yaw_kd_nm_per_radps2: 0.025
@@ -83,7 +118,9 @@ drift_4wid_speed_yaw_pid:
     # MATLAB actuator constraints. command_slew limits torque commands; it is
     # not a sensor-data filter.
     stop_time_s: 0.55
-    software_torque_max_nm: 0.68
+    # The motors permit 0.8 Nm.  The proven pulse remains below this limit;
+    # the extra headroom is available to the closed-loop correction.
+    software_torque_max_nm: 0.80
     command_slew_nmps: 4.0
 
     # Hardware safety checks. Zero max_run_time uses the MATLAB time formula.
