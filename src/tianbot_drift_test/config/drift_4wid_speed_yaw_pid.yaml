@@ -45,15 +45,15 @@ drift_4wid_speed_yaw_pid:
 
     # Acceleration-based sideslip estimate and beta-to-yaw-reference outer loop.
     beta_desired_deg: -30.0
-    beta_kp_radps_per_rad: 1.0
+    beta_kp_radps_per_rad: 1.5
     max_beta_yaw_ref_correction_radps: 0.40
     beta_estimate_min_deg: -70.0
     beta_estimate_max_deg: 30.0
     beta_estimate_min_speed_mps: 0.35
 
     # Acceleration and open-loop initiation from the MATLAB controller.
-    accel_time_s: 0.78
-    accel_torque_max_nm: 0.54
+    accel_time_s: 0.40
+    accel_torque_max_nm: 0.68
     accel_max_yaw_correction_nm: 0.08
     pulse_duration_s: 0.82
     pulse_torque_nm: [-0.128, 0.260, -0.096, 0.248]

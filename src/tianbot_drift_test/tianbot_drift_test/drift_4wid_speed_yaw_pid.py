@@ -170,7 +170,7 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
             float(self.param("beta_desired_deg", -30.0))
         )
         self.beta_kp = float(
-            self.param("beta_kp_radps_per_rad", 1.0)
+            self.param("beta_kp_radps_per_rad", 1.5)
         )
         self.max_beta_yaw_ref_correction = float(
             self.param("max_beta_yaw_ref_correction_radps", 0.40)
@@ -185,9 +185,9 @@ class Drift4WidSpeedYawPid(MatlabDriftPid):
             self.param("beta_estimate_min_speed_mps", 0.35)
         )
 
-        self.accel_time = float(self.param("accel_time_s", 0.78))
+        self.accel_time = float(self.param("accel_time_s", 0.40))
         self.accel_torque_max = float(
-            self.param("accel_torque_max_nm", 0.54)
+            self.param("accel_torque_max_nm", 0.68)
         )
         self.accel_max_yaw_correction = float(
             self.param("accel_max_yaw_correction_nm", 0.08)
