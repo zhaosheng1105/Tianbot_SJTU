@@ -1,39 +1,34 @@
 function ros2bag_matlab(varargin)
 %ROS2BAG_MATLAB Analyze one Tianbot drift rosbag from the MATLAB command line.
 %
-% Command form:
-%   ros2bag_matlab -rosbag2_2026_07_19-20_33_18
+% Command form (relative paths are resolved from the MATLAB current folder):
+%   ros2bag_matlab ../ros2_bag/rosbag2_2026_07_21-17_16_51
 %
-% This file lives in Tianbot_SJTU/tools. The selected rosbag directory is
-% resolved relative to the Tianbot_SJTU workspace root.
+% Absolute paths are also accepted. Results are written to
+% BAG_DIRECTORY/analysis_4wid/report.html.
 
 if numel(varargin) ~= 1
     error('ros2bag_matlab:InvalidInput', ...
         ['Please specify exactly one rosbag directory, for example:' newline ...
-         '  ros2bag_matlab -rosbag2_2026_07_19-20_33_18']);
+         '  ros2bag_matlab ../ros2_bag/rosbag2_2026_07_21-17_16_51']);
 end
 
 bagArgument = varargin{1};
 if ~(ischar(bagArgument) || (isstring(bagArgument) && isscalar(bagArgument)))
     error('ros2bag_matlab:InvalidInput', ...
-        'The rosbag selector must be a character vector or string scalar.');
+        'The rosbag path must be a character vector or string scalar.');
 end
 
-bagName = strtrim(char(bagArgument));
-if startsWith(bagName, '-')
-    bagName = bagName(2:end);
-end
-if isempty(bagName) || contains(bagName, '/') || contains(bagName, '\') || ...
-        contains(bagName, '..')
-    error('ros2bag_matlab:InvalidBagName', ...
-        'Use only the rosbag directory name, not a path: %s', bagName);
+bagPath = strtrim(char(bagArgument));
+if isempty(bagPath)
+    error('ros2bag_matlab:InvalidBagPath', ...
+        'The rosbag directory path cannot be empty.');
 end
 
 toolsDirectory = fileparts(mfilename('fullpath'));
 workspaceRoot = fileparts(toolsDirectory);
-bagDirectory = fullfile(workspaceRoot, bagName);
-analyzer = fullfile(workspaceRoot, 'src', 'tianbot_drift_test', ...
-    'tianbot_drift_test', 'analyze_drift_rosbag.py');
+bagDirectory = resolveFromCurrentFolder(bagPath);
+analyzer = fullfile(workspaceRoot, 'tools', 'analyze_drift_rosbag.py');
 controllerYaml = fullfile(workspaceRoot, 'src', 'tianbot_drift_test', ...
     'config', 'drift_4wid_speed_yaw_pid.yaml');
 outputDirectory = fullfile(bagDirectory, 'analysis_4wid');
@@ -76,6 +71,22 @@ end
 fprintf('Analysis complete.\n');
 fprintf('HTML report: %s\n', fullfile(outputDirectory, 'report.html'));
 fprintf('Markdown summary: %s\n', fullfile(outputDirectory, 'summary.md'));
+end
+
+
+function absolutePath = resolveFromCurrentFolder(inputPath)
+% Resolve relative input against pwd while preserving absolute paths.
+if ispc
+    isAbsolute = ~isempty(regexp(inputPath, ...
+        '^(?:[A-Za-z]:[\\/]|[\\/]{2})', 'once'));
+else
+    isAbsolute = startsWith(inputPath, filesep);
+end
+if isAbsolute
+    absolutePath = inputPath;
+else
+    absolutePath = fullfile(pwd, inputPath);
+end
 end
 
 
